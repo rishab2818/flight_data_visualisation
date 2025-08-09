@@ -1,0 +1,25 @@
+[
+    {
+        "id": 2,
+        "num_bytes": 5,
+        "length": 11,
+        "fields": [
+            {"name": "A", "size": 3},
+            {"name": "B", "size": 1, "bits": ["b0", "b1", "b2", "b3", "b4", "b5", "b6", "b7"]},
+            {"name": "C", "size": 1}
+        ],
+        "all_fields": ["A", "B", "b0", "b1", "b2", "b3", "b4", "b5", "b6", "b7", "C", "F", "G", "e0", "e1", "e2", "e3", "e4", "e5", "e6", "e7"]
+    },
+    {
+        "id": 3,
+        "num_bytes": 6,
+        "length": 12,
+        "fields": [
+            {"name": "A", "size": 3},
+            {"name": "B", "size": 1, "bits": ["e0", "e1", "e2", "e3", "e4", "e5", "e6", "e7"]},
+            {"name": "F", "size": 1},
+            {"name": "G", "size": 1}
+        ],
+        "all_fields": ["A", "B", "b0", "b1", "b2", "b3", "b4", "b5", "b6", "b7", "C", "F", "G", "e0", "e1", "e2", "e3", "e4", "e5", "e6", "e7"]
+    }
+]

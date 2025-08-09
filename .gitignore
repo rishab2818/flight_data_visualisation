@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# App runtime data
+backend/data/
+backend/tmp/
+backend/logs/
+backend/app.db
+backend/database.db
+
+# Test/cache
+.pytest_cache/
+.mypy_cache/
+.cache/
