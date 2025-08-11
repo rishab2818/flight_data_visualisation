@@ -1,4 +1,4 @@
-# Flight Data Platform — Product Phase 1 (Polished, Offline)
+# Flight Data Platform 
 
 ## Backend
 ```
