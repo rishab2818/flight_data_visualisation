@@ -6,11 +6,15 @@ from security import hash_password
 from routers import auth, datasets, jobs, plots, projects
 
 app = FastAPI(title="Flight Data Platform — Phase 1 (Product, Polished)")
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
-init_db()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_credentials=True,
+    allow_methods=["*"], allow_headers=["*"]
+)
 
 @app.on_event("startup")
-def seed_admin():
+def on_startup():
+    init_db()
     db = SessionLocal()
     try:
         if db.query(User).count() == 0:

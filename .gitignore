@@ -10,6 +10,7 @@ dist/
 
 # App runtime data
 backend/data/
+backend/datastore/
 backend/tmp/
 backend/logs/
 backend/app.db

@@ -1,11 +1,11 @@
 fastapi
 uvicorn[standard]
-sqlalchemy
-psycopg2-binary
+sqlalchemy>=2.0
+psycopg2-binary>=2.9
 python-multipart
-passlib[bcrypt]
+passlib[bcrypt]>=1.7.4,<2.0
 python-jose[cryptography]
-pydantic
+pydantic>=1.10
 pandas
 pyarrow
 dask[dataframe]
@@ -16,3 +16,4 @@ tenacity
 numexpr
 alembic
 pytest
+python-dotenv

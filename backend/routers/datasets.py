@@ -53,8 +53,13 @@ async def upload(file: UploadFile = File(...), name: str = Form(None), user: Use
     if settings.REDIS_URL and hasattr(taskmod, "celery_app"):
         taskmod.parse_task.delay(job_id, dataset_id, raw_path, SCHEMA_FILE)
     else:
-        import threading
-        threading.Thread(target=__import__("services.parse_service", fromlist=[""]).stream_to_parquet, args=(job_id, dataset_id, raw_path, SCHEMA_FILE), daemon=True).start()
+        import threading, importlib
+        t = threading.Thread(
+        target=parse_module.stream_to_parquet,
+        args=(job_id, dataset_id, raw_path, SCHEMA_FILE),
+        daemon=True
+        )
+        t.start()
     return {"job_id": job_id, "dataset_id": dataset_id}
 
 @router.post("/demo_upload")
