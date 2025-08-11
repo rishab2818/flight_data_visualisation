@@ -1,187 +1,357 @@
-import json
-import pandas as pd
-import plotly.express as px
-from abc import ABC, abstractmethod
+import os, json
+from datetime import datetime
+from typing import Dict, List, Optional
 
-class Packet(ABC):
-    """Base class for packets."""
-    START_FRAME = 0x01
-    END_FRAME = 0x05
+import pyarrow as pa
+import pyarrow.parquet as pq
 
-    def __init__(self, packet_bytes, schema):
-        self.bytes = packet_bytes
-        self.schema = schema
-        self.valid = False
-        self.data = {}
+from db.session import SessionLocal
+from models import Dataset, Job, JobStatus
+import packet_parser
 
-    def validate(self):
-        """Validate common packet structure based on schema."""
-        if len(self.bytes) < 5:
-            print(f"Validation failed: Packet too short, len={len(self.bytes)}")
-            return False
-        if self.bytes[0] != self.START_FRAME:
-            print(f"Validation failed: Invalid start frame, got={self.bytes[0]:02X}, expected={self.START_FRAME:02X}")
-            return False
-        if self.bytes[-1] != self.END_FRAME:
-            print(f"Validation failed: Invalid end frame, got={self.bytes[-1]:02X}, expected={self.END_FRAME:02X}")
-            return False
-        packet_id = self.bytes[1]
-        if packet_id != self.schema['id']:
-            print(f"Validation failed: ID mismatch, got={packet_id:02X}, expected={self.schema['id']:02X}")
-            return False
-        if self.bytes[2] != self.schema['num_bytes']:
-            print(f"Validation failed: NumBytes mismatch, got={self.bytes[2]:02X}, expected={self.schema['num_bytes']:02X}")
-            return False
-        if len(self.bytes) != self.schema['length']:
-            print(f"Validation failed: Length mismatch, got={len(self.bytes)}, expected={self.schema['length']}")
-            return False
-        # Calculate number of data bytes based on fields
-        data_bytes_count = sum(field['size'] for field in self.schema['fields']) + 1  # +1 for NumBytes
-        data_start = 2
-        data_end = data_start + data_bytes_count
-        data_bytes = self.bytes[data_start:data_end]
-        checksum = sum(data_bytes) % 65536
-        checksum_msb = self.bytes[-3]
-        checksum_lsb = self.bytes[-2]
-        expected_checksum = (checksum_msb << 8) | checksum_lsb
-        if checksum != expected_checksum:
-            print(f"Validation failed: Checksum mismatch, got={expected_checksum}, expected={checksum}, data_bytes={data_bytes}")
-            return False
-        self.valid = True
-        return True
+# --- realtime bus (optional) ---
+try:
+    from events import events
+except Exception:
+    events = None
 
-    @abstractmethod
-    def parse(self):
-        """Parse packet data into a dictionary based on schema."""
-        pass
 
-class DynamicPacket(Packet):
-    """Dynamic packet parser using schema."""
-    def parse(self):
-        """Parse packet data according to schema."""
-        if not self.validate():
-            return
-        self.data = {'ID': self.schema['id']}
-        offset = 3  # Start after Start, ID, NumBytes
-        for field in self.schema['fields']:
-            name = field['name']
-            size = field['size']
-            if size == 3:  # 24-bit field
-                value = (self.bytes[offset] << 16) | (self.bytes[offset+1] << 8) | self.bytes[offset+2]
-                offset += 3
-            elif size == 1:  # 8-bit field
-                value = self.bytes[offset]
-                offset += 1
-            else:
-                raise ValueError(f"Unsupported field size: {size}")
-            self.data[name] = value
-            # Handle bit fields if specified
-            if 'bits' in field:
-                bits = [(value >> i) & 1 for i in range(8)]
-                for i, bit_name in enumerate(field['bits']):
-                    self.data[bit_name] = bits[i]
-        # Initialize other fields as None for consistency
-        for other_field in set(self.schema.get('all_fields', [])) - set(self.data.keys()):
-            self.data[other_field] = None
+# ----------------- helpers -----------------
 
-class PacketFactory:
-    """Factory to create packet objects based on schema."""
-    def __init__(self, schema_file):
-        with open(schema_file, 'r') as f:
-            self.schemas = json.load(f)
-
-    def create_packet(self, packet_bytes):
-        if len(packet_bytes) < 2:
-            print(f"Packet too short to determine ID: {packet_bytes}")
-            return None
-        packet_id = packet_bytes[1]
-        schema = next((s for s in self.schemas if s['id'] == packet_id), None)
-        if schema:
-            return DynamicPacket(packet_bytes, schema)
-        print(f"No schema found for ID: {packet_id:02X}")
-        return None
-
-def read_and_parse_packets(input_file, schema_file):
-    """Read and parse packets from the input file using schema."""
-    factory = PacketFactory(schema_file)
-    packets_data = []
-    packet_num = 0
-    with open(input_file, 'r') as f:
-        for line in f:
-            packet_num += 1
-            try:
-                packet_bytes = [int(b, 16) for b in line.strip().split()]
-                packet = factory.create_packet(packet_bytes)
-                if packet:
-                    packet.parse()
-                    if packet.valid:
-                        packet.data['PacketNum'] = packet_num
-                        packets_data.append(packet.data)
-                    else:
-                        print(f"Invalid packet at line {packet_num}: {line.strip()}")
-                else:
-                    print(f"Unknown packet ID at line {packet_num}: {line.strip()}")
-            except ValueError as e:
-                print(f"Error parsing line {packet_num}: {e}")
-            if packet_num % 100000 == 0:
-                print(f"Processed {packet_num} packets")
-    return packets_data, factory
-
-def save_to_csv(packets_data, output_file, schema_file):
-    """Save parsed data to a CSV file."""
-    with open(schema_file, 'r') as f:
+def compute_all_columns(schema_path: str) -> List[str]:
+    with open(schema_path, "r") as f:
         schemas = json.load(f)
-    all_fields = set(['PacketNum', 'ID'])
+
+    cols = set(["PacketNum", "ID"])
     for schema in schemas:
-        all_fields.update(schema.get('all_fields', []))
-        for field in schema['fields']:
-            all_fields.add(field['name'])
-            if 'bits' in field:
-                all_fields.update(field['bits'])
-    columns = sorted(list(all_fields))
-    df = pd.DataFrame(packets_data, columns=columns)
-    df.to_csv(output_file, index=False)
-    return df
+        cols.update(schema.get("all_fields", []))
+        for field in schema.get("fields", []):
+            cols.add(field["name"])
+            for bit in field.get("bits", []):
+                cols.add(bit)
+    return ["PacketNum", "ID"] + sorted(c for c in cols if c not in ("PacketNum", "ID"))
 
-def plot_data(df):
-    """Prompt user to select columns and plot using Plotly."""
-    if df.empty:
-        print("No data to plot.")
-        return
-    columns = df.columns.tolist()
-    print("\nAvailable columns for plotting:")
-    for i, col in enumerate(columns, 1):
-        print(f"{i}. {col}")
-    
-    while True:
+
+def _publish(job_id: str, payload: Dict):
+    if events is not None:
         try:
-            x_choice = int(input("\nSelect the X-axis column (number): ")) - 1
-            y_choice = int(input("Select the Y-axis column (number): ")) - 1
-            if 0 <= x_choice < len(columns) and 0 <= y_choice < len(columns):
-                x_col, y_col = columns[x_choice], columns[y_choice]
-                break
+            events.publish(job_id, payload)
+        except Exception:
+            pass
+
+
+def append_log(job_id: str, text: str, *, progress: Optional[float] = None, message: Optional[str] = None):
+    ts = datetime.utcnow().isoformat()
+    payload = {"job_id": job_id, "type": "log", "ts": ts, "log": text}
+    if progress is not None:
+        payload["progress"] = progress
+    if message is not None:
+        payload["message"] = message
+    _publish(job_id, payload)
+
+
+def set_status(job_id: str, status: JobStatus, *, progress: Optional[float] = None, message: Optional[str] = None):
+    db = SessionLocal()
+    try:
+        j = db.query(Job).filter(Job.id == job_id).first()
+        if not j:
+            return
+        j.status = status
+        if progress is not None:
+            j.progress = progress
+        if message is not None:
+            j.message = message
+        if status in (JobStatus.success, JobStatus.failed) and j.finished_at is None:
+            j.finished_at = datetime.utcnow()
+        db.add(j)
+        db.commit()
+    finally:
+        db.close()
+
+    _publish(job_id, {
+        "job_id": job_id,
+        "type": "status",
+        "status": str(status),
+        "progress": progress,
+        "message": message,
+    })
+
+
+# ----------- robust frame scanning (stateful across chunks) -----------
+
+class FrameScanner:
+    """
+    Stateful scanner: feed() with arbitrary bytes; yields complete frames [START ... END].
+    Keeps buffer across chunk boundaries to avoid truncated/invalid packets.
+    """
+    def __init__(self, start_byte: int, end_byte: int):
+        self.START = start_byte
+        self.END = end_byte
+        self._buf = bytearray()
+        self._inside = False
+
+    def feed(self, data: bytes):
+        for b in data:
+            if not self._inside:
+                if b == self.START:
+                    self._buf.clear()
+                    self._buf.append(b)
+                    self._inside = True
+                # else skip until START appears
+                continue
             else:
-                print("Invalid selection. Please choose valid column numbers.")
-        except ValueError:
-            print("Please enter valid numbers.")
-    
-    print(f"\nGenerating scatter plot: {x_col} (X) vs {y_col} (Y)")
-    fig = px.scatter(df, x=x_col, y=y_col, title=f"{x_col} vs {y_col}")
-    fig.show()
+                self._buf.append(b)
+                if b == self.END:
+                    # complete frame
+                    yield bytes(self._buf)
+                    self._buf.clear()
+                    self._inside = False
+                elif b == self.START:
+                    # resync on unexpected START inside a frame (drop previous partial)
+                    self._buf.clear()
+                    self._buf.append(b)
+                    self._inside = True
 
-def main():
-    input_file = 'serial_data.txt'
-    schema_file = 'packet_schema.json'
-    output_file = 'parsed_data.csv'
-    
-    print("Reading and parsing packets...")
-    packets_data, _ = read_and_parse_packets(input_file, schema_file)
-    
-    print(f"Saving data to {output_file}...")
-    df = save_to_csv(packets_data, output_file, schema_file)
-    
-    print(f"Parsed {len(packets_data)} valid packets.")
-    plot_data(df)
+    def flush(self):
+        """Call at EOF to drop any partial frame."""
+        self._buf.clear()
+        self._inside = False
 
-if __name__ == '__main__':
-    main()
+
+def _looks_like_hex_text(header: bytes) -> bool:
+    # If the file is a hex-dump (e.g., "01 02 05 ..."), it contains only hex chars + whitespace.
+    sample = header[:4096]
+    allowed = set(b"0123456789abcdefABCDEF \t\r\n")
+    # Heuristic: mostly allowed chars and not many NULs
+    if not sample:
+        return False
+    bad = sum(1 for ch in sample if ch not in allowed)
+    nul = sample.count(b"\x00")
+    return bad == 0 and nul == 0
+
+
+def _safe_create_packet(factory, frame: bytes):
+    """
+    Some factories expect list[int], others bytes; try both.
+    """
+    pkt = None
+    try:
+        pkt = factory.create_packet(list(frame))
+    except Exception:
+        try:
+            pkt = factory.create_packet(frame)
+        except Exception:
+            pkt = None
+    return pkt
+
+
+# ----------------- main parse -----------------
+
+def stream_to_parquet(job_id: str, dataset_id: str, raw_path: str, schema_file: str, batch_size: int = 1000):
+    db = SessionLocal()
+    try:
+        set_status(job_id, JobStatus.running, progress=0.0, message="starting")
+        append_log(job_id, "Parsing started", progress=0.0, message="starting")
+
+        out_dir = os.path.dirname(raw_path)
+        parquet_path = os.path.join(out_dir, "data.parquet")
+
+        cols = compute_all_columns(schema_file)
+        factory = packet_parser.PacketFactory(schema_file)
+        START = getattr(packet_parser.Packet, "START_FRAME", 0x01)
+        END = getattr(packet_parser.Packet, "END_FRAME", 0x05)
+        scanner = FrameScanner(START, END)
+
+        packet_num = 0
+        valid = 0
+        batch: List[Dict] = []
+        writer: Optional[pq.ParquetWriter] = None
+
+        # file size only for coarse progress (optional)
+        try:
+            file_size = os.path.getsize(raw_path)
+        except OSError:
+            file_size = None
+        bytes_read = 0
+
+        def pkt_to_row(pkt: "packet_parser.Packet") -> Dict:
+            row = {c: None for c in cols}
+            row["PacketNum"] = packet_num
+            # let your Packet/Factory set ID in pkt.data if applicable
+            row["ID"] = pkt.data.get("ID") if hasattr(pkt, "data") else None
+            if hasattr(pkt, "data"):
+                for k, v in pkt.data.items():
+                    if k in row:
+                        row[k] = v
+            return row
+
+        with open(raw_path, "rb") as f:
+            # Peek header to detect hex-dump vs binary
+            header = f.read(8192)
+            bytes_read += len(header)
+            hex_mode = _looks_like_hex_text(header)
+
+            if hex_mode:
+                # Process the peeked header lines first, then continue line by line.
+                def _feed_hex_lines(chunk: bytes):
+                    # split on lines; parse each as hex tokens -> bytes; feed to scanner
+                    for line in chunk.splitlines():
+                        s = line.strip()
+                        if not s:
+                            continue
+                        try:
+                            tokens = s.split()
+                            data = bytes(int(tok, 16) for tok in tokens)
+                        except Exception:
+                            append_log(job_id, f"Malformed hex line (ignored)")
+                            continue
+                        for frame in scanner.feed(data):
+                            yield frame
+
+                # handle header
+                for frame in _feed_hex_lines(header):
+                    pkt = _safe_create_packet(factory, frame)
+                    if not pkt:
+                        append_log(job_id, "No schema for frame (hex mode)")
+                        continue
+                    try:
+                        # Many repos require .parse() to populate pkt.data
+                        if hasattr(pkt, "parse"):
+                            pkt.parse()
+                    except Exception as e:
+                        append_log(job_id, f"Parse error: {e!r}")
+                        continue
+
+                    packet_num += 1
+                    batch.append(pkt_to_row(pkt))
+                    valid += 1
+                    if len(batch) >= batch_size:
+                        table = pa.Table.from_pylist(batch)
+                        if writer is None:
+                            writer = pq.ParquetWriter(parquet_path, table.schema)
+                        writer.write_table(table)
+                        batch.clear()
+                        pct = None
+                        if file_size:
+                            pct = min(90.0, round(bytes_read * 100.0 / file_size, 2))
+                        append_log(job_id, f"Wrote {valid} packets", progress=pct, message="parsing")
+                        set_status(job_id, JobStatus.running, progress=pct, message="parsing")
+
+                # continue reading line by line
+                for line in f:
+                    bytes_read += len(line)
+                    for frame in _feed_hex_lines(line):
+                        pkt = _safe_create_packet(factory, frame)
+                        if not pkt:
+                            append_log(job_id, "No schema for frame (hex mode)")
+                            continue
+                        try:
+                            if hasattr(pkt, "parse"):
+                                pkt.parse()
+                        except Exception as e:
+                            append_log(job_id, f"Parse error: {e!r}")
+                            continue
+
+                        packet_num += 1
+                        batch.append(pkt_to_row(pkt))
+                        valid += 1
+                        if len(batch) >= batch_size:
+                            table = pa.Table.from_pylist(batch)
+                            if writer is None:
+                                writer = pq.ParquetWriter(parquet_path, table.schema)
+                            writer.write_table(table)
+                            batch.clear()
+                            pct = None
+                            if file_size:
+                                pct = min(90.0, round(bytes_read * 100.0 / file_size, 2))
+                            append_log(job_id, f"Wrote {valid} packets", progress=pct, message="parsing")
+                            set_status(job_id, JobStatus.running, progress=pct, message="parsing")
+
+            else:
+                # BINARY MODE: feed raw bytes to scanner; DO NOT decode
+                if header:
+                    for frame in scanner.feed(header):
+                        pkt = _safe_create_packet(factory, frame)
+                        if not pkt:
+                            append_log(job_id, "No schema for frame (binary head)")
+                            continue
+                        try:
+                            if hasattr(pkt, "parse"):
+                                pkt.parse()
+                        except Exception as e:
+                            append_log(job_id, f"Parse error: {e!r}")
+                            continue
+
+                        packet_num += 1
+                        batch.append(pkt_to_row(pkt))
+                        valid += 1
+                        if len(batch) >= batch_size:
+                            table = pa.Table.from_pylist(batch)
+                            if writer is None:
+                                writer = pq.ParquetWriter(parquet_path, table.schema)
+                            writer.write_table(table)
+                            batch.clear()
+
+                while True:
+                    chunk = f.read(4 * 1024 * 1024)  # 4MB
+                    if not chunk:
+                        break
+                    bytes_read += len(chunk)
+                    for frame in scanner.feed(chunk):
+                        pkt = _safe_create_packet(factory, frame)
+                        if not pkt:
+                            append_log(job_id, "No schema for frame (binary)")
+                            continue
+                        try:
+                            if hasattr(pkt, "parse"):
+                                pkt.parse()
+                        except Exception as e:
+                            append_log(job_id, f"Parse error: {e!r}")
+                            continue
+
+                        packet_num += 1
+                        batch.append(pkt_to_row(pkt))
+                        valid += 1
+                        if len(batch) >= batch_size:
+                            table = pa.Table.from_pylist(batch)
+                            if writer is None:
+                                writer = pq.ParquetWriter(parquet_path, table.schema)
+                            writer.write_table(table)
+                            batch.clear()
+
+                    # sparse status checkpoint
+                    pct = None
+                    if file_size:
+                        pct = min(90.0, round(bytes_read * 100.0 / file_size, 2))
+                    set_status(job_id, JobStatus.running, progress=pct, message="parsing")
+
+            # drop any partial frame at EOF (don’t emit)
+            scanner.flush()
+
+        # flush remaining rows
+        if batch:
+            table = pa.Table.from_pylist(batch)
+            if writer is None:
+                writer = pq.ParquetWriter(parquet_path, table.schema)
+            writer.write_table(table)
+            batch.clear()
+        if writer:
+            writer.close()
+
+        # persist dataset metadata
+        d = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+        if d:
+            d.parquet_path = parquet_path
+            d.columns_json = json.dumps(cols)
+            d.packet_count = valid
+            db.add(d)
+            db.commit()
+
+        append_log(job_id, f"Completed: rows={valid}", progress=95.0, message="parsed")
+        set_status(job_id, JobStatus.success, progress=100.0, message="completed")
+
+    except Exception as e:
+        append_log(job_id, f"Error: {e!r}", progress=100.0, message="failed")
+        set_status(job_id, JobStatus.failed, progress=100.0, message=str(e))
+    finally:
+        db.close()

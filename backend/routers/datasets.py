@@ -1,94 +1,210 @@
+# backend/routers/datasets.py
 import os, uuid, json, shutil
 from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
+
 from core.config import settings
 from db.session import SessionLocal
 from models import Dataset, Job, JobStatus, User
 from routers.auth import require_user
-from repositories.dataset_repo import list_datasets, get_dataset
+from services.parse_service import stream_to_parquet
 import tasks as taskmod
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 
 def get_db():
     db = SessionLocal()
-    try: yield db
-    finally: db.close()
+    try:
+        yield db
+    finally:
+        db.close()
 
-SCHEMA_FILE = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "packet_schema.json"))
+DATA_ROOT = getattr(settings, "DATA_ROOT", "./data")
+SCHEMA_FILE = getattr(settings, "SCHEMA_FILE", os.path.join(os.path.dirname(__file__), "..", "packet_schema.json"))
+SCHEMA_FILE = os.path.abspath(SCHEMA_FILE)
 
 @router.get("")
-def api_list(user: User = Depends(require_user), db: Session = Depends(get_db)):
-    return list_datasets(db)
+def list_datasets(user: User = Depends(require_user), db: Session = Depends(get_db)):
+    rows = db.query(Dataset).all()
+    return [{
+        "id": r.id,
+        "name": r.name,
+        "original_filename": r.original_filename,
+        "packet_count": r.packet_count,
+        "parquet_path": r.parquet_path
+    } for r in rows]
 
 @router.get("/{dataset_id}/columns")
 def columns(dataset_id: str, user: User = Depends(require_user), db: Session = Depends(get_db)):
-    ds = get_dataset(db, dataset_id)
-    if not ds: raise HTTPException(status_code=404, detail="not found")
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not ds:
+        raise HTTPException(status_code=404, detail="object not found")
     return {"columns": json.loads(ds.columns_json) if ds.columns_json else []}
 
+# Your frontend calls /download_proxy — keep it
 @router.get("/{dataset_id}/download_proxy")
-def download_proxy(dataset_id: str, file_type: str = Query("raw", enum=["raw","parquet"]), user: User = Depends(require_user), db: Session = Depends(get_db)):
-    ds = get_dataset(db, dataset_id)
-    if not ds: raise HTTPException(status_code=404, detail="not found")
-    if file_type=="raw":
-        if not ds.raw_path or not os.path.exists(ds.raw_path): raise HTTPException(status_code=400, detail="raw missing")
+def download_proxy(dataset_id: str, file_type: str = Query("parquet"), user: User = Depends(require_user), db: Session = Depends(get_db)):
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not ds:
+        raise HTTPException(status_code=404, detail="object not found")
+    if file_type == "raw":
+        if not ds.raw_path or not os.path.exists(ds.raw_path):
+            raise HTTPException(status_code=400, detail="raw missing")
         return FileResponse(ds.raw_path, filename=os.path.basename(ds.raw_path))
     else:
-        if not ds.parquet_path or not os.path.exists(ds.parquet_path): raise HTTPException(status_code=400, detail="parquet missing")
+        if not ds.parquet_path or not os.path.exists(ds.parquet_path):
+            raise HTTPException(status_code=400, detail="parquet missing")
         return FileResponse(ds.parquet_path, filename=os.path.basename(ds.parquet_path))
 
+# (Optional) Also support /download for future-proofing
+@router.get("/{dataset_id}/download")
+def download(dataset_id: str, file_type: str = Query("parquet"), user: User = Depends(require_user), db: Session = Depends(get_db)):
+    return download_proxy(dataset_id, file_type, user, db)
+
 @router.post("/upload")
-async def upload(file: UploadFile = File(...), name: str = Form(None), user: User = Depends(require_user), db: Session = Depends(get_db)):
+def upload_dataset(
+    file: UploadFile = File(...),
+    name: str = Form(None),
+    user: User = Depends(require_user),
+    db: Session = Depends(get_db),
+):
     dataset_id = str(uuid.uuid4())
-    dataset_dir = os.path.join(settings.DATA_DIR, dataset_id); os.makedirs(dataset_dir, exist_ok=True)
-    raw_filename = file.filename or "serial_data.txt"; raw_path = os.path.join(dataset_dir, raw_filename)
-    content = await file.read(); open(raw_path, "wb").write(content)
-    ds = Dataset(id=dataset_id, owner_id=user.id, name=name or os.path.splitext(raw_filename)[0], original_filename=raw_filename, raw_path=raw_path)
+    root = os.path.join(DATA_ROOT, dataset_id)
+    os.makedirs(root, exist_ok=True)
+    raw_path = os.path.join(root, file.filename)
+
+    # stream to disk
+    with open(raw_path, "wb") as out:
+        shutil.copyfileobj(file.file, out, length=1024 * 1024)
+
+    ds = Dataset(
+        id=dataset_id,
+        owner_id=getattr(user, "id", None),
+        name=name or file.filename,
+        original_filename=file.filename,
+        raw_path=raw_path,
+    )
     db.add(ds); db.commit()
+
     job_id = str(uuid.uuid4())
-    job = Job(id=job_id, user_id=user.id, dataset_id=dataset_id, status=JobStatus.pending, progress=0.0, message="queued", logs="")
+    job = Job(
+        id=job_id,
+        user_id=getattr(user, "id", None),
+        dataset_id=dataset_id,
+        status=JobStatus.pending,
+        progress=0.0,
+        message="queued",
+        logs=None,  # not used anymore
+    )
     db.add(job); db.commit()
-    if settings.REDIS_URL and hasattr(taskmod, "celery_app"):
-        taskmod.parse_task.delay(job_id, dataset_id, raw_path, SCHEMA_FILE)
-    else:
-        import threading, importlib
-        t = threading.Thread(
-        target=parse_module.stream_to_parquet,
-        args=(job_id, dataset_id, raw_path, SCHEMA_FILE),
-        daemon=True
-        )
-        t.start()
+
+    _start_parse_async(job_id, dataset_id, raw_path, SCHEMA_FILE)
+    return {"job_id": job_id, "dataset_id": dataset_id}
+
+@router.post("/{dataset_id}/parse")
+def parse_dataset(dataset_id: str, user: User = Depends(require_user), db: Session = Depends(get_db)):
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not ds:
+        raise HTTPException(status_code=404, detail="object not found")
+
+    job_id = str(uuid.uuid4())
+    job = Job(
+        id=job_id,
+        user_id=getattr(user, "id", None),
+        dataset_id=dataset_id,
+        status=JobStatus.pending,
+        progress=0.0,
+        message="queued",
+        logs=None,
+    )
+    db.add(job); db.commit()
+
+    _start_parse_async(job_id, dataset_id, ds.raw_path, SCHEMA_FILE)
     return {"job_id": job_id, "dataset_id": dataset_id}
 
 @router.post("/demo_upload")
-async def demo_upload(name: str = Form(None), user: User = Depends(require_user), db: Session = Depends(get_db)):
+def demo_upload(name: str = Form(None), user: User = Depends(require_user), db: Session = Depends(get_db)):
     sample = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "serial_data.txt"))
-    if not os.path.exists(sample): raise HTTPException(status_code=404, detail="sample missing")
+    if not os.path.exists(sample):
+        raise HTTPException(status_code=404, detail="sample missing")
+
     dataset_id = str(uuid.uuid4())
-    dataset_dir = os.path.join(settings.DATA_DIR, dataset_id); os.makedirs(dataset_dir, exist_ok=True)
-    raw_filename = os.path.basename(sample); raw_path = os.path.join(dataset_dir, raw_filename)
-    open(raw_path, "wb").write(open(sample, "rb").read())
-    ds = Dataset(id=dataset_id, owner_id=user.id, name=name or os.path.splitext(raw_filename)[0], original_filename=raw_filename, raw_path=raw_path)
+    root = os.path.join(DATA_ROOT, dataset_id)
+    os.makedirs(root, exist_ok=True)
+    raw_path = os.path.join(root, "serial_data.txt")
+    shutil.copyfile(sample, raw_path)
+
+    ds = Dataset(
+        id=dataset_id,
+        owner_id=getattr(user, "id", None),
+        name=name or "demo_serial_data",
+        original_filename="serial_data.txt",
+        raw_path=raw_path,
+    )
     db.add(ds); db.commit()
+
     job_id = str(uuid.uuid4())
-    job = Job(id=job_id, user_id=user.id, dataset_id=dataset_id, status=JobStatus.pending, progress=0.0, message="queued", logs="")
+    job = Job(
+        id=job_id,
+        user_id=getattr(user, "id", None),
+        dataset_id=dataset_id,
+        status=JobStatus.pending,
+        progress=0.0,
+        message="queued",
+        logs=None,
+    )
     db.add(job); db.commit()
-    if settings.REDIS_URL and hasattr(taskmod, "celery_app"):
-        taskmod.parse_task.delay(job_id, dataset_id, raw_path, SCHEMA_FILE)
-    else:
-        import threading
-        threading.Thread(target=__import__("services.parse_service", fromlist=[""]).stream_to_parquet, args=(job_id, dataset_id, raw_path, SCHEMA_FILE), daemon=True).start()
+
+    _start_parse_async(job_id, dataset_id, raw_path, SCHEMA_FILE)
     return {"job_id": job_id, "dataset_id": dataset_id}
 
 @router.delete("/{dataset_id}")
-def delete(dataset_id: str, user: User = Depends(require_user), db: Session = Depends(get_db)):
-    ds = get_dataset(db, dataset_id)
-    if not ds: raise HTTPException(status_code=404, detail="not found")
-    if str(user.role).lower() != "admin" and user.id != ds.owner_id:
-        raise HTTPException(status_code=403, detail="forbidden")
+@router.delete("/{dataset_id}")
+def delete_dataset(dataset_id: str, user: User = Depends(require_user), db: Session = Depends(get_db)):
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not ds:
+        raise HTTPException(status_code=404, detail="object not found")
+
+    # block if a job is running/pending for this dataset
+    running = db.query(Job).filter(
+        Job.dataset_id == dataset_id,
+        Job.status.in_([JobStatus.pending, JobStatus.running])
+    ).first()
+    if running:
+        raise HTTPException(status_code=400, detail="job running; stop it before delete")
+
+    root = os.path.dirname(ds.raw_path) if ds.raw_path else None
+    db.delete(ds)
+    db.commit()
+
+    if root and os.path.exists(root):
+        shutil.rmtree(root, ignore_errors=True)
+
+    return {"ok": True}
+
+    ds = db.query(Dataset).filter(Dataset.id == dataset_id).first()
+    if not ds:
+        raise HTTPException(status_code=404, detail="object not found")
+
     root = os.path.dirname(ds.raw_path) if ds.raw_path else None
     db.delete(ds); db.commit()
-    if root and os.path.exists(root): shutil.rmtree(root, ignore_errors=True)
+
+    if root and os.path.exists(root):
+        shutil.rmtree(root, ignore_errors=True)
     return {"ok": True}
+
+def _start_parse_async(job_id: str, dataset_id: str, raw_path: str, schema_file: str) -> None:
+    redis_url = getattr(settings, "REDIS_URL", None)
+    if redis_url and getattr(taskmod, "celery_app", None):
+        try:
+            taskmod.celery_app.send_task(
+                "tasks.parse_task",
+                args=[job_id, dataset_id, raw_path, schema_file],
+                queue="default",
+            )
+            return
+        except Exception:
+            pass
+    import threading
+    threading.Thread(target=stream_to_parquet, args=(job_id, dataset_id, raw_path, schema_file), daemon=True).start()
