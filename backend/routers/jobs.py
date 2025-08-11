@@ -1,6 +1,7 @@
-import asyncio, json
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from sqlalchemy.orm import Session
+
 from backend.db.session import SessionLocal
 from backend.repositories.job_repo import get_job
 from backend.routers.auth import require_user
@@ -19,24 +20,26 @@ def get_db():
 @router.get("/{job_id}")
 def get_job_status(job_id: str, user = Depends(require_user), db: Session = Depends(get_db)):
     j = get_job(db, job_id)
-    if not j: raise HTTPException(status_code=404, detail="not found")
+    if not j:
+        raise HTTPException(status_code=404, detail="not found")
     return {
         "id": j.id,
         "status": str(j.status),
         "progress": float(j.progress or 0.0),
         "message": j.message or "",
-        # logs intentionally omitted from DB per requirements
+        # logs are not persisted by design
         "logs": "",
     }
 
+# (Optional) legacy endpoint: keep but return empty since logs aren't stored
 @router.get("/{job_id}/logdump")
 def job_logdump(job_id: str, user = Depends(require_user), db: Session = Depends(get_db)):
-    # returns recent in-memory events so legacy UIs can poll logs
-    return {"job_id": job_id, "events": events.dump(job_id)}
+    return {"job_id": job_id, "events": []}
 
 async def _ws_loop(websocket: WebSocket, job_id: str):
     await websocket.accept()
-    # initial snapshot
+
+    # send initial snapshot from DB
     db = SessionLocal()
     try:
         j = db.query(Job).filter(Job.id == job_id).first()
@@ -53,32 +56,22 @@ async def _ws_loop(websocket: WebSocket, job_id: str):
     finally:
         db.close()
 
-    # live stream
-    q = await events.subscribe(job_id)
+    # live stream via Redis pub/sub (falls back to in-process if Redis is absent)
     try:
-        while True:
-            payload = await q.get()
+        async for payload in events.stream(job_id):
             await websocket.send_json(payload)
-            if payload.get("type") == "status" and str(payload.get("status")) in (
-                "success", "failed", str(JobStatus.success), str(JobStatus.failed)
-            ):
-                await asyncio.sleep(0.3)
-                break
     except WebSocketDisconnect:
-        pass
-    finally:
-        await events.unsubscribe(job_id, q)
-        try:
-            await websocket.close()
-        except Exception:
-            pass
+        return
+    except Exception:
+        # best-effort; just drop the socket on unexpected errors
+        return
 
-# support old pattern: /jobs/{job_id}/ws
+# compat: /jobs/{job_id}/ws
 @router.websocket("/{job_id}/ws")
 async def ws_job_old(websocket: WebSocket, job_id: str):
     await _ws_loop(websocket, job_id)
 
-# support your frontend pattern: /jobs/ws/{job_id}
+# current: /jobs/ws/{job_id}
 @router.websocket("/ws/{job_id}")
 async def ws_job(websocket: WebSocket, job_id: str):
     await _ws_loop(websocket, job_id)
