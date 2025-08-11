@@ -1,0 +1,27 @@
+Metadata-Version: 2.4
+Name: flightdv
+Version: 0.1.0
+Summary: Flight data visualisation backend/frontend
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+
+# Flight Data Platform 
+
+## Backend
+```
+cd backend
+python -m pip install -r requirements.txt
+python -m uvicorn app:app --reload --host 0.0.0.0 --port 8000
+```
+- Login: admin / admin
+- Optional: set `DATABASE_URL` (Postgres) and `REDIS_URL` (Celery).
+
+## Frontend
+```
+cd frontend
+npm install
+npm run dev
+# http://localhost:5173
+```
+
+

@@ -1,6 +1,6 @@
 from sqlalchemy import Column, String, Integer, DateTime, Text
 from sqlalchemy.sql import func
-from db.session import Base
+from backend.db.session import Base
 
 class Dataset(Base):
     __tablename__ = "datasets"

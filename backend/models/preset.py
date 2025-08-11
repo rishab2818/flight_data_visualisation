@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, DateTime, Text
 from sqlalchemy.sql import func
-from db.session import Base
+from backend.db.session import Base
 
 class PlotPreset(Base):
     __tablename__ = "plot_presets"

@@ -4,12 +4,12 @@ from fastapi import APIRouter, UploadFile, File, Form, Depends, HTTPException, Q
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from core.config import settings
-from db.session import SessionLocal
-from models import Dataset, Job, JobStatus, User
-from routers.auth import require_user
-from services.parse_service import stream_to_parquet
-import tasks as taskmod
+from backend.core.config import settings
+from backend.db.session import SessionLocal
+from backend.models import Dataset, Job, JobStatus, User
+from backend.routers.auth import require_user
+from backend.services.parse_service import stream_to_parquet
+import backend.tasks as taskmod
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
 

@@ -2,10 +2,10 @@ import os, json
 from fastapi import APIRouter, Depends, HTTPException, Header, Query, Body
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
-from db.session import SessionLocal
-from models import Dataset, User, PlotPreset
-from security import decode_token
-from services.plot_service import build_plot_html, build_overlay_plot_html
+from backend.db.session import SessionLocal
+from backend.models import Dataset, User, PlotPreset
+from backend.security import decode_token
+from backend.services.plot_service import build_plot_html, build_overlay_plot_html
 
 router = APIRouter(prefix="/plots", tags=["plots"])
 

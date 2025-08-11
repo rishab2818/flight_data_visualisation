@@ -1,6 +1,6 @@
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base, scoped_session
-from core.config import settings
+from backend.core.config import settings
 
 # Strictly Postgres now, with a real connection pool
 engine = create_engine(
@@ -17,5 +17,5 @@ Base = declarative_base()
 
 def init_db():
     # Import models to register metadata, then create tables if missing
-    import models  # noqa
+    import backend.models  # noqa
     Base.metadata.create_all(bind=engine)

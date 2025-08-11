@@ -6,7 +6,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from db.session import SessionLocal
-from models import Dataset, Job, JobStatus
+from backend.models import Dataset, Job, JobStatus
 import packet_parser
 
 # --- realtime bus (optional) ---

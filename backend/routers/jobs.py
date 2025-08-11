@@ -1,11 +1,11 @@
 import asyncio, json
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
 from sqlalchemy.orm import Session
-from db.session import SessionLocal
-from repositories.job_repo import get_job
-from routers.auth import require_user
-from models import Job, JobStatus
-from events import events
+from backend.db.session import SessionLocal
+from backend.repositories.job_repo import get_job
+from backend.routers.auth import require_user
+from backend.models import Job, JobStatus
+from backend.events import events
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 

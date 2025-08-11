@@ -2,6 +2,7 @@
 __pycache__/
 *.pyc
 *.pyo
+*.venv/
 
 # Node
 node_modules/

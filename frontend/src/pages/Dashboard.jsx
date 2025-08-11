@@ -19,9 +19,46 @@ export default function Dashboard(){
   const [ycol, setY] = useState('')
   const [series, setSeries] = useState([]) // overlay series [{datasetId, yCol, label}]
   const wsRef = useRef(null)
+ const API_BASE = import.meta.env.VITE_API_BASE || 'http://localhost:8000';
+const WS_BASE = API_BASE.replace(/^http/i, 'ws');
+
   const [presets, setPresets] = useState([])
   const [presetName, setPresetName] = useState('')
   const [presetDesc, setPresetDesc] = useState('')
+  const [uploadPct, setUploadPct] = useState(0)
+function openJobWS(jobId, datasetId) {
+  if (wsRef.current) { try { wsRef.current.close(); } catch {} }
+  setLogs('');
+  setJob({ id: jobId, dataset: datasetId, status: 'pending', progress: 0, message: '' });
+
+  const ws = new WebSocket(`${WS_BASE}/jobs/ws/${jobId}`);
+  wsRef.current = ws;
+
+  ws.onmessage = (evt) => {
+    const msg = JSON.parse(evt.data);
+
+    if (msg.type === 'log') {
+      const line = (msg.ts ? `[${msg.ts}] ` : '') + (msg.log || '');
+        setLogs(prev => prev + ((msg.ts ? `[${msg.ts}] `:'') + (msg.log||'')) + '\n')
+    }
+
+    if (msg.type === 'snapshot' || msg.type === 'status') {
+      setJob(prev => ({ ...(prev||{}), status: msg.status, progress: Math.round(msg.progress||0), message: msg.message||'' }));
+
+      // when done, load columns and refresh dataset list
+      if (msg.status === 'success') {
+        if (datasetId) { loadColumns(datasetId); }
+        fetchDatasets();
+        toast.success('Parsing complete');
+      }
+      if (msg.status === 'failed') {
+        toast.error(msg.message || 'Parsing failed');
+      }
+    }
+  };
+}
+
+
 
   async function refreshPresets(){
     try{
@@ -67,21 +104,36 @@ export default function Dashboard(){
 
   function handleFile(e){ setFile(e.target.files[0]) }
 
-  async function upload(){
-    if(!file){ toast.error('Pick a file'); return }
-    try{
-      const fd = new FormData(); fd.append('file', file); fd.append('name', name)
-      const res = await api.post('/datasets/upload', fd)
-      toast.success('Upload started')
-      startWS(res.data.job_id, res.data.dataset_id)
-    }catch(e){ toast.error('Upload failed') }
+async function upload(){
+  if(!file){ toast.error('Pick a file'); return }
+  try{
+    const fd = new FormData(); 
+    fd.append('file', file); 
+    fd.append('name', name)
+
+    const res = await api.post('/datasets/upload', fd, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      onUploadProgress: (evt) => {
+        if(!evt.total) return
+        const pct = Math.round((evt.loaded * 100) / evt.total)
+        setUploadPct(pct)
+      },
+    })
+
+    toast.success('Upload started')
+    openJobWS(res.data.job_id, res.data.dataset_id)
+    setUploadPct(0) // reset after kickoff (or keep final value)
+    //startWS(res.data.job_id, res.data.dataset_id)
+  }catch(e){ 
+    toast.error('Upload failed') 
   }
+}
 
   async function demo(){
     try{
       const res = await api.post('/datasets/demo_upload')
       toast.success('Demo started')
-      startWS(res.data.job_id, res.data.dataset_id)
+openJobWS(res.data.job_id, res.data.dataset_id)
     }catch(e){ toast.error('Demo failed') }
   }
 
@@ -207,6 +259,13 @@ export default function Dashboard(){
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
         <div className="card lg:col-span-2">
           <h3 className="text-base font-semibold mb-2">Upload & Parse</h3>
+          {uploadPct > 0 && (
+  <div className="progress" style={{marginTop:8, background:'#eee', height:12, borderRadius:6, overflow:'hidden'}}>
+    <div style={{height:'100%', width:`${uploadPct}%`, background:'#4a90e2', color:'#fff', fontSize:10, display:'flex', alignItems:'center', justifyContent:'center'}}>
+      {uploadPct}%
+    </div>
+  </div>
+)}
           <div className="flex flex-wrap gap-2 items-center">
             <input type="file" accept=".txt" onChange={handleFile} className="input" />
             <input className="input" placeholder="dataset name" value={name} onChange={e=>setName(e.target.value)} />
@@ -219,7 +278,7 @@ export default function Dashboard(){
               <div className="text-sm">Status: <span className="badge">{job.status}</span></div>
               <div className="progress"><div style={{width: (job.progress||0)+'%'}}></div></div>
               <div className="text-sm text-slate-600 dark:text-slate-300">Message: {job.message}</div>
-              <div className="log mt-2">{logs}</div>
+              <div className="log mt-2">{logs || 'waiting for logs…'}</div>
             </div>) : <div className="text-slate-500 text-sm">No active job</div>}
           </div>
         </div>

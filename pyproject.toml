@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "flightdv"
+version = "0.1.0"
+description = "Flight data visualisation backend/frontend"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []  # your runtime deps live in requirements.txt; this can stay empty
+
+[tool.setuptools.packages.find]
+include = ["backend*"]

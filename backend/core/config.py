@@ -29,6 +29,11 @@ class Settings:
     JWT_ALG: str = _get_env("JWT_ALG", "HS256")
     JWT_EXPIRE_MINUTES: int = int(_get_env("JWT_EXPIRE_MINUTES", "4320"))
 
+    REDIS_URL = os.getenv("REDIS_URL", "")
+    CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", os.getenv("REDIS_URL", ""))
+    CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", os.getenv("REDIS_URL", ""))
+    DATA_ROOT = os.getenv("DATA_ROOT", "./data")
+    SCHEMA_FILE = os.getenv("SCHEMA_FILE", os.path.join(os.path.dirname(__file__), "..", "packet_schema.json"))
     # Data dir relative to backend/
     DATA_DIR: str = str(BACKEND_DIR / "data_store")
 

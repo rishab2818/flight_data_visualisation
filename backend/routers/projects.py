@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.orm import Session
-from db.session import SessionLocal
-from models import Project, ProjectMember, Role, User
-from routers.auth import require_user
+from backend.db.session import SessionLocal
+from backend.models import Project, ProjectMember, Role, User
+from backend.routers.auth import require_user
 
 router = APIRouter(prefix="/projects", tags=["projects"])
 

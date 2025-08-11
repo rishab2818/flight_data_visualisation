@@ -2,7 +2,7 @@ from passlib.hash import bcrypt
 from jose import jwt, JWTError
 from datetime import datetime, timedelta
 from typing import Optional
-from core.config import settings
+from backend.core.config import settings
 
 def hash_password(pw: str) -> str: return bcrypt.hash(pw)
 def verify_password(pw: str, pw_hash: str) -> bool: return bcrypt.verify(pw, pw_hash)

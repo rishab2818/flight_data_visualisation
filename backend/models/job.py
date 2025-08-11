@@ -1,7 +1,7 @@
 import enum
 from sqlalchemy import Column, String, Integer, DateTime, Text, Float, Enum
 from sqlalchemy.sql import func
-from db.session import Base
+from backend.db.session import Base
 
 class JobStatus(str, enum.Enum):
     pending = "pending"
